@@ -1,0 +1,22 @@
+{
+    "name":  "warden-travel-agent",
+    "version":  "0.1.0",
+    "type":  "module",
+    "main":  "dist/agent.js",
+    "scripts":  {
+                    "build":  "tsc",
+                    "dev":  "tsc --watch",
+                    "agent":  "node dist/agent.js",
+                    "start":  "node dist/agent.js"
+                },
+    "dependencies":  {
+                         "@wardenprotocol/agent-kit":  "^0.2.0",
+                         "axios":  "^1.13.3",
+                         "dotenv":  "^16.4.0",
+                         "openai":  "^4.69.0"
+                     },
+    "devDependencies":  {
+                            "@types/node":  "^22.8.1",
+                            "typescript":  "^5.6.3"
+                        }
+}
