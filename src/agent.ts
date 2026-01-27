@@ -23,39 +23,49 @@ async function getAmadeusToken(): Promise<string> {
   if (amadeusToken && tokenExpiry && tokenExpiry > new Date()) {
     return amadeusToken;
   }
-  const response = await axios.post(
-    "https://test.api.amadeus.com/v1/security/oauth2/token",
-    new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: AMADEUS_API_KEY!,
-      client_secret: AMADEUS_API_SECRET!,
-    }),
-    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-  );
-  amadeusToken = response.data.access_token;
-  tokenExpiry = new Date(Date.now() + (response.data.expires_in - 300) * 1000);
-  return amadeusToken;
+  try {
+    const response = await axios.post(
+      "https://test.api.amadeus.com/v1/security/oauth2/token",
+      new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: AMADEUS_API_KEY!,
+        client_secret: AMADEUS_API_SECRET!,
+      }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+    amadeusToken = response.data.access_token;
+    tokenExpiry = new Date(Date.now() + (response.data.expires_in - 300) * 1000);
+    return amadeusToken;
+  } catch (error: any) {
+    console.error("getAmadeusToken error:", error.message || error);
+    throw new Error(`Failed to get Amadeus token: ${error.message}`);
+  }
 }
 
 async function searchFlights(origin: string, destination: string, departureDate: string) {
-  const token = await getAmadeusToken();
-  const response = await axios.get(
-    "https://test.api.amadeus.com/v2/shopping/flight-offers",
-    {
-      headers: { Authorization: `Bearer ${token}` },
-      params: { originLocationCode: origin, destinationLocationCode: destination, departureDate, adults: 1, max: 10 },
-    }
-  );
-  return (response.data.data || []).slice(0, 5).map((flight: any, i: number) => ({
-    number: i + 1,
-    airline: flight.itineraries[0]?.segments[0]?.carrierCode || "N/A",
-    flightNumber: `${flight.itineraries[0]?.segments[0]?.carrierCode}${flight.itineraries[0]?.segments[0]?.number}`,
-    departure: flight.itineraries[0]?.segments[0]?.departure?.at || "N/A",
-    arrival: flight.itineraries[0]?.segments[0]?.arrival?.at || "N/A",
-    duration: flight.itineraries[0]?.duration || "N/A",
-    price: `${flight.price?.total || "N/A"} ${flight.price?.currency || "USD"}`,
-    stops: flight.itineraries[0]?.segments?.length > 1 ? "1+ stops" : "Direct",
-  }));
+  try {
+    const token = await getAmadeusToken();
+    const response = await axios.get(
+      "https://test.api.amadeus.com/v2/shopping/flight-offers",
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { originLocationCode: origin, destinationLocationCode: destination, departureDate, adults: 1, max: 10 },
+      }
+    );
+    return (response.data.data || []).slice(0, 5).map((flight: any, i: number) => ({
+      number: i + 1,
+      airline: flight.itineraries[0]?.segments[0]?.carrierCode || "N/A",
+      flightNumber: `${flight.itineraries[0]?.segments[0]?.carrierCode}${flight.itineraries[0]?.segments[0]?.number}`,
+      departure: flight.itineraries[0]?.segments[0]?.departure?.at || "N/A",
+      arrival: flight.itineraries[0]?.segments[0]?.arrival?.at || "N/A",
+      duration: flight.itineraries[0]?.duration || "N/A",
+      price: `${flight.price?.total || "N/A"} ${flight.price?.currency || "USD"}`,
+      stops: flight.itineraries[0]?.segments?.length > 1 ? "1+ stops" : "Direct",
+    }));
+  } catch (error: any) {
+    console.error("searchFlights error:", error.message || error);
+    throw new Error(`Flight search failed: ${error.message}`);
+  }
 }
 
 async function searchHotels(cityName: string, checkIn: string, checkOut: string) {
@@ -112,7 +122,8 @@ async function extractTravelInfo(userMessage: string) {
       response_format: { type: "json_object" },
     });
     return JSON.parse(response.choices[0]?.message?.content || "{}");
-  } catch {
+  } catch (error: any) {
+    console.error("extractTravelInfo error:", error.message || error);
     return { intent: "general_chat" };
   }
 }
