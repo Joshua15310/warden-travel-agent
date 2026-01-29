@@ -5,8 +5,10 @@ import { AgentServer } from "@wardenprotocol/agent-kit";
 import type { TaskContext, TaskYieldUpdate, MessagePart } from "@wardenprotocol/agent-kit";
 
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = process.env.HOST || "localhost";
-const BASE_URL = `http://${HOST}:${PORT}`;
+const HOST = process.env.HOST || "0.0.0.0";
+const BASE_URL = process.env.NODE_ENV === "production" 
+  ? "https://warden-travel-agent-bayx.onrender.com"
+  : `http://localhost:${PORT}`;
 
 const llm = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || process.env.GROK_API_KEY,

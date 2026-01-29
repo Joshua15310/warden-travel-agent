@@ -11,12 +11,16 @@
                     "render-build":  "npm install --include=dev && npm run build"
                 },
     "dependencies":  {
-                         "@wardenprotocol/agent-kit":  "^0.2.0",
+                         "@wardenprotocol/agent-kit":  "^0.3.1",
                          "axios":  "^1.13.3",
+                         "cors":  "^2.8.6",
                          "dotenv":  "^16.4.0",
+                         "express":  "^5.2.1",
                          "openai":  "^4.69.0"
                      },
     "devDependencies":  {
+                            "@types/cors":  "^2.8.19",
+                            "@types/express":  "^5.0.6",
                             "@types/node":  "^22.8.1",
                             "typescript":  "^5.6.3"
                         }
