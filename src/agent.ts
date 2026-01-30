@@ -1,7 +1,7 @@
 import "dotenv/config";
 import OpenAI from "openai";
 import axios from "axios";
-import { AgentServer } from "@wardenprotocol/agent-kit";
+import express from "express";
 import type { TaskContext, TaskYieldUpdate, MessagePart } from "@wardenprotocol/agent-kit";
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -130,72 +130,94 @@ async function extractTravelInfo(userMessage: string) {
   }
 }
 
-const server = new AgentServer({
-  agentCard: {
+const app = express();
+app.use(express.json());
+
+// Serve agent card for A2A discovery
+app.get("/.well-known/agent-card.json", (req, res) => {
+  res.json({
     name: "Warden Travel Research",
     description: "AI travel assistant - searches real flights (Amadeus) and hotels (Booking.com) worldwide",
     url: BASE_URL,
     version: "0.3.0",
     capabilities: { streaming: false, multiTurn: true },
-  },
-  handler: async function* (context: TaskContext): AsyncGenerator<TaskYieldUpdate> {
-    const userMessage = context.message.parts?.filter((p): p is MessagePart & { type: "text" } => p.type === "text").map((p) => p.text).join("\n");
-    if (!userMessage) {
-      yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text: "No message received." }] } };
-      return;
-    }
-    try {
-      yield { state: "working" };
-      const info = await extractTravelInfo(userMessage);
-      
-      if (info.intent === "search_flights" && info.origin && info.destination && info.departureDate) {
-        const flights = await searchFlights(info.origin, info.destination, info.departureDate);
-        let text = ` Flights from ${info.origin} to ${info.destination} (${info.departureDate})\n\n`;
-        flights.forEach((f: any) => {
-          text += `${f.number}. ${f.airline} ${f.flightNumber}\n   Depart: ${f.departure}\n   Arrive: ${f.arrival}\n   Duration: ${f.duration}\n   Price: ${f.price}\n   Type: ${f.stops}\n\n`;
-        });
-        text += `Book at: Google Flights, Kayak, or airline websites`;
-        yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text }] } };
-      } else if (info.intent === "search_hotels" && info.destination && info.checkIn && info.checkOut) {
-        const hotels = await searchHotels(info.destination, info.checkIn, info.checkOut);
-        let text = ` Hotels in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
-        hotels.forEach((h: any) => {
-          text += `${h.number}. ${h.name}\n   Rating: ${h.rating}/10 (${h.reviewCount} reviews)\n   Price: ${h.price} total\n   Location: ${h.location}\n\n`;
-        });
-        text += `Book at: Booking.com, Hotels.com, or directly with hotels`;
-        yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text }] } };
-      } else if (info.intent === "search_both" && info.origin && info.destination && info.departureDate && info.checkIn && info.checkOut) {
-        const [flights, hotels] = await Promise.all([
-          searchFlights(info.origin, info.destination, info.departureDate),
-          searchHotels(info.destination, info.checkIn, info.checkOut),
-        ]);
-        let text = ` FLIGHTS from ${info.origin} to ${info.destination} (${info.departureDate})\n\n`;
-        flights.forEach((f: any) => {
-          text += `${f.number}. ${f.airline} ${f.flightNumber} - ${f.price} (${f.stops})\n`;
-        });
-        text += `\n HOTELS in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
-        hotels.forEach((h: any) => {
-          text += `${h.number}. ${h.name} - ${h.price} (${h.rating}/10)\n`;
-        });
-        text += `\nBook flights: Google Flights, Kayak | Book hotels: Booking.com`;
-        yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text }] } };
-      } else {
-        const resp = await llm.chat.completions.create({
-          model: process.env.GROK_API_KEY ? "grok-3" : "gpt-4o-mini",
-          messages: [
-            { role: "system", content: "Travel assistant. Help with flights and hotels. Examples: 'Find flights from NYC to London on March 15' or 'Show hotels in Paris from April 1-5' or 'Plan trip to Tokyo March 10-15'" },
-            { role: "user", content: userMessage },
-          ],
-        });
-        yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text: resp.choices[0]?.message?.content || "" }] } };
-      }
-    } catch (error: any) {
-      yield { state: "failed", message: { role: "agent", parts: [{ type: "text", text: `Error: ${error.message}` }] } };
-    }
-  },
+    defaultInputModes: ["text"],
+    defaultOutputModes: ["text"],
+  });
 });
 
-server.listen(PORT).then(() => {
+// Main POST / handler for Warden registration
+app.post("/", async (req, res) => {
+  try {
+    const { input } = req.body;
+    if (!input || !input.messages || input.messages.length === 0) {
+      return res.status(400).json({ error: "Missing messages in input" });
+    }
+    
+    const userMessage = input.messages[0]?.content;
+    if (!userMessage) {
+      return res.status(400).json({ error: "Message content required" });
+    }
+    
+    const info = await extractTravelInfo(userMessage);
+    let responseText = "";
+    
+    if (info.intent === "search_flights" && info.origin && info.destination && info.departureDate) {
+      const flights = await searchFlights(info.origin, info.destination, info.departureDate);
+      responseText = ` Flights from ${info.origin} to ${info.destination} (${info.departureDate})\n\n`;
+      flights.forEach((f: any) => {
+        responseText += `${f.number}. ${f.airline} ${f.flightNumber}\n   Depart: ${f.departure}\n   Arrive: ${f.arrival}\n   Duration: ${f.duration}\n   Price: ${f.price}\n   Type: ${f.stops}\n\n`;
+      });
+      responseText += `Book at: Google Flights, Kayak, or airline websites`;
+    } else if (info.intent === "search_hotels" && info.destination && info.checkIn && info.checkOut) {
+      const hotels = await searchHotels(info.destination, info.checkIn, info.checkOut);
+      responseText = ` Hotels in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
+      hotels.forEach((h: any) => {
+        responseText += `${h.number}. ${h.name}\n   Rating: ${h.rating}/10 (${h.reviewCount} reviews)\n   Price: ${h.price} total\n   Location: ${h.location}\n\n`;
+      });
+      responseText += `Book at: Booking.com, Hotels.com, or directly with hotels`;
+    } else if (info.intent === "search_both" && info.origin && info.destination && info.departureDate && info.checkIn && info.checkOut) {
+      const [flights, hotels] = await Promise.all([
+        searchFlights(info.origin, info.destination, info.departureDate),
+        searchHotels(info.destination, info.checkIn, info.checkOut),
+      ]);
+      responseText = ` FLIGHTS from ${info.origin} to ${info.destination} (${info.departureDate})\n\n`;
+      flights.forEach((f: any) => {
+        responseText += `${f.number}. ${f.airline} ${f.flightNumber} - ${f.price} (${f.stops})\n`;
+      });
+      responseText += `\n HOTELS in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
+      hotels.forEach((h: any) => {
+        responseText += `${h.number}. ${h.name} - ${h.price} (${h.rating}/10)\n`;
+      });
+      responseText += `\nBook flights: Google Flights, Kayak | Book hotels: Booking.com`;
+    } else {
+      const resp = await llm.chat.completions.create({
+        model: process.env.GROK_API_KEY ? "grok-3" : "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "Travel assistant. Help with flights and hotels. Examples: 'Find flights from NYC to London on March 15' or 'Show hotels in Paris from April 1-5' or 'Plan trip to Tokyo March 10-15'" },
+          { role: "user", content: userMessage },
+        ],
+      });
+      responseText = resp.choices[0]?.message?.content || "No response generated";
+    }
+    
+    res.json({
+      output: {
+        messages: [
+          {
+            role: "agent",
+            content: responseText,
+          },
+        ],
+      },
+    });
+  } catch (error: any) {
+    console.error("POST / error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.listen(PORT, HOST, () => {
   const llmProvider = process.env.GROK_API_KEY ? "Grok" : "OpenAI";
   console.log(`\nWarden Travel Agent ready at ${BASE_URL}`);
   console.log(`LLM: ${llmProvider} - ${!!(process.env.GROK_API_KEY || process.env.OPENAI_API_KEY) ? "" : ""}`);
