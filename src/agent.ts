@@ -1,6 +1,7 @@
 import "dotenv/config";
 import OpenAI from "openai";
 import axios from "axios";
+import { createServer } from "http";
 import { AgentServer } from "@wardenprotocol/agent-kit";
 import type { TaskContext, TaskYieldUpdate, MessagePart } from "@wardenprotocol/agent-kit";
 import { ethers } from "ethers";
@@ -189,7 +190,7 @@ async function extractTravelInfo(userMessage: string) {
   }
 }
 
-const server = new AgentServer({
+const agentServer = new AgentServer({
   agentCard: {
     name: "Warden Travel Research",
     description: "AI travel assistant - searches real flights (Amadeus) and hotels (Booking.com) worldwide",
@@ -275,7 +276,48 @@ const server = new AgentServer({
   },
 });
 
-server.listen(PORT).then(() => {
+const httpServer = createServer(async (req, res) => {
+  const url = new URL(req.url || "/", `http://${req.headers.host}`);
+
+  if (url.pathname === "/agent-hub") {
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, A2A-Version, Accept",
+    });
+    res.end(JSON.stringify({
+      agentCard: agentServer.getAgentCard(),
+      status: "ok",
+      base: BASE_URL,
+    }));
+    return;
+  }
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, A2A-Version, Accept",
+    });
+    res.end();
+    return;
+  }
+
+  const path = url.pathname;
+  if (path === "/.well-known/agent-card.json" || path === "/.well-known/agent-card" || (path === "/" && req.method === "POST")) {
+    return agentServer.getA2AServer().getHandler()(req, res);
+  }
+
+  if (path === "/info" || path === "/ok" || path.startsWith("/assistants") || path.startsWith("/threads") || path.startsWith("/runs") || path.startsWith("/store")) {
+    return agentServer.getLangGraphServer().getHandler()(req, res);
+  }
+
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Not found" }));
+});
+
+httpServer.listen(PORT, () => {
   const llmProvider = process.env.GROK_API_KEY ? "Grok" : "OpenAI";
   console.log(`\nWarden Travel Agent ready at ${BASE_URL}`);
   console.log(`LLM: ${llmProvider} - ${!!(process.env.GROK_API_KEY || process.env.OPENAI_API_KEY) ? "" : ""}`);
