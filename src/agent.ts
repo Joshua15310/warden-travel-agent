@@ -100,12 +100,25 @@ async function searchFlights(origin: string, destination: string, departureDate:
       return [];
     }
 
+    const resolvedOrigin = await resolveIataCode(origin);
+    const resolvedDestination = await resolveIataCode(destination);
+
+    if (!resolvedOrigin || !resolvedDestination) {
+      throw new Error(`Could not resolve origin/destination to IATA codes (${origin} -> ${resolvedOrigin || "N/A"}, ${destination} -> ${resolvedDestination || "N/A"}).`);
+    }
+
     const token = await getAmadeusToken();
     const response = await axios.get(
       "https://test.api.amadeus.com/v2/shopping/flight-offers",
       {
         headers: { Authorization: `Bearer ${token}` },
-        params: { originLocationCode: origin, destinationLocationCode: destination, departureDate, adults: 1, max: 10 },
+        params: {
+          originLocationCode: resolvedOrigin,
+          destinationLocationCode: resolvedDestination,
+          departureDate,
+          adults: 1,
+          max: 10,
+        },
       }
     );
     return (response.data.data || []).slice(0, 5).map((flight: any, i: number) => ({
@@ -173,6 +186,53 @@ async function searchHotels(cityName: string, checkIn: string, checkOut: string)
   }
 }
 
+async function resolveIataCode(location: string): Promise<string> {
+  if (!location) return "";
+  const normalized = location.trim();
+  if (/^[A-Z]{3}$/.test(normalized.toUpperCase())) return normalized.toUpperCase();
+
+  const fallbackMappings: Record<string, string> = {
+    "new york": "JFK",
+    "jfk": "JFK",
+    "newark": "EWR",
+    "london": "LHR",
+    "paris": "CDG",
+    "los angeles": "LAX",
+    "tokyo": "HND",
+    "sfo": "SFO",
+    "san francisco": "SFO",
+    "las vegas": "LAS",
+    "dubai": "DXB",
+    "rome": "FCO",
+    "berlin": "BER",
+    "chicago": "ORD",
+    "wcg": "WCG"
+  };
+
+  const candidate = normalized.toLowerCase();
+  if (fallbackMappings[candidate]) {
+    return fallbackMappings[candidate];
+  }
+
+  if (!AMADEUS_API_KEY || !AMADEUS_API_SECRET) {
+    return "";
+  }
+
+  try {
+    const token = await getAmadeusToken();
+    const response = await axios.get("https://test.api.amadeus.com/v1/reference-data/locations", {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { keyword: normalized, subType: "AIRPORT,CITY" },
+    });
+
+    const place = (response.data?.data || []).find((item: any) => item.subType === "CITY" || item.subType === "AIRPORT");
+    return place?.iataCode?.toUpperCase() || "";
+  } catch (error: any) {
+    console.warn("resolveIataCode failed:", error.message || error);
+    return "";
+  }
+}
+
 async function extractTravelInfo(userMessage: string) {
   try {
     const response = await llm.chat.completions.create({
@@ -183,7 +243,41 @@ async function extractTravelInfo(userMessage: string) {
       ],
       response_format: { type: "json_object" },
     });
-    return JSON.parse(response.choices[0]?.message?.content || "{}");
+
+    const text = response.choices[0]?.message?.content || "";
+    let info: any = { intent: "general_chat" };
+
+    try {
+      info = JSON.parse(text);
+    } catch {
+      const lowercase = userMessage.toLowerCase();
+      if (lowercase.includes("flight") || lowercase.includes("fly") || lowercase.includes("to") && lowercase.includes("from")) {
+        info.intent = "search_flights";
+        const match = userMessage.match(/from\s+([^\s]+)\s+to\s+([^\s]+)(?:\s+on\s+(\d{4}-\d{2}-\d{2}|[A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?))?/i);
+        if (match) {
+          info.origin = match[1];
+          info.destination = match[2];
+          info.departureDate = match[3] ? match[3] : "";
+        }
+      } else if (lowercase.includes("hotel") || lowercase.includes("stay")) {
+        info.intent = "search_hotels";
+        const match = userMessage.match(/(?:in|at)\s+([A-Za-z\s]+)(?:\s+from\s+(\d{4}-\d{2}-\d{2}))?(?:\s+to\s+(\d{4}-\d{2}-\d{2}))?/i);
+        if (match) {
+          info.destination = match[1].trim();
+          info.checkIn = match[2] || "";
+          info.checkOut = match[3] || "";
+        }
+      }
+    }
+
+    return {
+      intent: info.intent || "general_chat",
+      origin: info.origin || "",
+      destination: info.destination || "",
+      departureDate: info.departureDate || info.departure_date || "",
+      checkIn: info.checkIn || info.check_in || "",
+      checkOut: info.checkOut || info.check_out || "",
+    };
   } catch (error: any) {
     console.error("extractTravelInfo error:", error.message || error);
     return { intent: "general_chat" };
@@ -279,7 +373,7 @@ const agentServer = new AgentServer({
 const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
-  if (url.pathname === "/agent-hub") {
+  if (url.pathname === "/agent-hub" || url.pathname === "/agent-hub/") {
     res.writeHead(200, {
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*",
@@ -291,6 +385,17 @@ const httpServer = createServer(async (req, res) => {
       status: "ok",
       base: BASE_URL,
     }));
+    return;
+  }
+
+  if (url.pathname === "/agent-card" || url.pathname === "/.well-known/agent-card.json" || url.pathname === "/.well-known/agent-card") {
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, A2A-Version, Accept",
+    });
+    res.end(JSON.stringify(agentServer.getAgentCard()));
     return;
   }
 
@@ -309,7 +414,18 @@ const httpServer = createServer(async (req, res) => {
     return agentServer.getA2AServer().getHandler()(req, res);
   }
 
-  if (path === "/info" || path === "/ok" || path.startsWith("/assistants") || path.startsWith("/threads") || path.startsWith("/runs") || path.startsWith("/store")) {
+  if (path === "/info" || path === "/ok") {
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, A2A-Version, Accept",
+    });
+    res.end(JSON.stringify({ status: "ok", agent: agentServer.getAgentCard().name, version: agentServer.getAgentCard().version }));
+    return;
+  }
+
+  if (path.startsWith("/assistants") || path.startsWith("/threads") || path.startsWith("/runs") || path.startsWith("/store")) {
     return agentServer.getLangGraphServer().getHandler()(req, res);
   }
 
@@ -317,10 +433,19 @@ const httpServer = createServer(async (req, res) => {
   res.end(JSON.stringify({ error: "Not found" }));
 });
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, async () => {
   const llmProvider = process.env.GROK_API_KEY ? "Grok" : "OpenAI";
   console.log(`\nWarden Travel Agent ready at ${BASE_URL}`);
-  console.log(`LLM: ${llmProvider} - ${!!(process.env.GROK_API_KEY || process.env.OPENAI_API_KEY) ? "" : ""}`);
-  console.log(`Amadeus (Flights): ${!!(AMADEUS_API_KEY && AMADEUS_API_SECRET) ? "" : ""}`);
-  console.log(`Booking.com (Hotels): ${!!RAPIDAPI_KEY ? "" : ""}\n`);
+  console.log(`LLM: ${llmProvider} - ${!!(process.env.GROK_API_KEY || process.env.OPENAI_API_KEY) ? "set" : "missing"}`);
+  console.log(`Amadeus (Flights): ${!!(AMADEUS_API_KEY && AMADEUS_API_SECRET) ? "set" : "missing"}`);
+  console.log(`Booking.com (Hotels): ${!!RAPIDAPI_KEY ? "set" : "missing"}`);
+
+  try {
+    const status = await verifyBridge();
+    console.log(`Bridge health check success: aiBot=${status.aiBot}, owner=${status.owner}`);
+  } catch (error) {
+    console.warn("Bridge health check failed, continuing startup (non-blocking).", error);
+  }
+
+  console.log("Health paths: /ok, /info, /agent-hub, /.well-known/agent-card.json, /agent-card");
 });
