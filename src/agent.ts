@@ -94,6 +94,11 @@ async function getAmadeusToken(): Promise<string> {
 
 async function searchFlights(origin: string, destination: string, departureDate: string) {
   try {
+    if (!AMADEUS_API_KEY || !AMADEUS_API_SECRET) {
+      console.warn("Missing Amadeus credentials: cannot search flights.");
+      return [];
+    }
+
     const token = await getAmadeusToken();
     const response = await axios.get(
       "https://test.api.amadeus.com/v2/shopping/flight-offers",
@@ -120,13 +125,21 @@ async function searchFlights(origin: string, destination: string, departureDate:
 
 async function searchHotels(cityName: string, checkIn: string, checkOut: string) {
   try {
+    if (!RAPIDAPI_KEY) {
+      console.warn("Missing BOOKING_API_KEY: cannot search hotels without RapidAPI key.");
+      return [];
+    }
+
     const locResponse = await axios.get("https://booking-com15.p.rapidapi.com/api/v1/hotels/searchDestination", {
       params: { query: cityName, locale: "en-gb" },
       headers: { "X-RapidAPI-Key": RAPIDAPI_KEY!, "X-RapidAPI-Host": "booking-com15.p.rapidapi.com" },
     });
 
     const destId = locResponse.data?.data?.[0]?.dest_id;
-    if (!destId) throw new Error("City not found");
+    if (!destId) {
+      console.warn(`Hotel destination not found for city '${cityName}', search result may be empty.`);
+      return [];
+    }
 
     const hotelResponse = await axios.get("https://booking-com15.p.rapidapi.com/api/v1/hotels/searchHotels", {
       params: {
@@ -214,6 +227,17 @@ const server = new AgentServer({
         yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text }] } };
       } else if (info.intent === "search_hotels" && info.destination && info.checkIn && info.checkOut) {
         const hotels = await searchHotels(info.destination, info.checkIn, info.checkOut);
+        if (!hotels || hotels.length === 0) {
+          yield {
+            state: "completed",
+            message: {
+              role: "agent",
+              parts: [{ type: "text", text: "I could not fetch live hotel listings right now. Please check your Booking API key, or try again in a moment with the same request." }],
+            },
+          };
+          return;
+        }
+
         let text = ` Hotels in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
         hotels.forEach((h: any) => {
           text += `${h.number}. ${h.name}\n   Rating: ${h.rating}/10 (${h.reviewCount} reviews)\n   Price: ${h.price} total\n   Location: ${h.location}\n\n`;
