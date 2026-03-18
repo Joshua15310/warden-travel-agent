@@ -1,14 +1,62 @@
 import "dotenv/config";
 import OpenAI from "openai";
 import axios from "axios";
-import express from "express";
+import { AgentServer } from "@wardenprotocol/agent-kit";
 import type { TaskContext, TaskYieldUpdate, MessagePart } from "@wardenprotocol/agent-kit";
+import { ethers } from "ethers";
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
-const BASE_URL = process.env.NODE_ENV === "production" 
+const BASE_URL = process.env.NODE_ENV === "production"
   ? "https://warden-travel-agent-bayx.onrender.com"
   : `http://localhost:${PORT}`;
+
+const BASE_RPC = process.env.BASE_RPC || "https://mainnet.base.org";
+const AI_AGENT_WALLET = process.env.AI_AGENT_WALLET || "0xe0002612868de24d85c8132ac9bd9342e1985923";
+const AI_AGENT_PK = process.env.AI_AGENT_PK || "";
+const WARDEN_BRIDGE = process.env.WARDEN_BRIDGE || "0x92cF4914826E49dE30E3e4B325417E8a96879d1E";
+
+const bridgeAbi = [
+  "function aiBot() view returns (address)",
+  "function owner() view returns (address)",
+  "function executeAction(string action) external",
+  "function executeActionWithValue(string action) external payable",
+  "event ActionExecuted(address indexed executor,string action,uint256 value,uint256 timestamp)"
+];
+
+const provider = new ethers.JsonRpcProvider(BASE_RPC);
+let bridgeSigner: ethers.Signer | ethers.JsonRpcProvider = provider;
+if (AI_AGENT_PK) {
+  bridgeSigner = new ethers.Wallet(AI_AGENT_PK, provider);
+} else {
+  console.warn("Warning: AI_AGENT_PK is not set. CallBridge() will fail without a signer.");
+}
+const bridgeContract = new ethers.Contract(WARDEN_BRIDGE, bridgeAbi, bridgeSigner);
+
+async function callBridge(action: string) {
+  if (!AI_AGENT_PK) {
+    throw new Error("AI_AGENT_PK is not set; cannot sign onchain tx.");
+  }
+  const tx = await bridgeContract.executeAction(action);
+  console.log("Bridge tx sent:", tx.hash);
+  const receipt = await tx.wait();
+  console.log("Bridge tx mined:", receipt.transactionHash);
+  return receipt;
+}
+
+async function verifyBridge() {
+  try {
+    const aiBot = await bridgeContract.aiBot();
+    const owner = await bridgeContract.owner();
+    console.log("Bridge contract:", WARDEN_BRIDGE);
+    console.log("aiBot:", aiBot);
+    console.log("owner:", owner);
+    return { aiBot, owner };
+  } catch (error) {
+    console.error("verifyBridge failed", error);
+    throw error;
+  }
+}
 
 const llm = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || process.env.GROK_API_KEY,
@@ -72,16 +120,14 @@ async function searchFlights(origin: string, destination: string, departureDate:
 
 async function searchHotels(cityName: string, checkIn: string, checkOut: string) {
   try {
-    // Step 1: Get destination ID
     const locResponse = await axios.get("https://booking-com15.p.rapidapi.com/api/v1/hotels/searchDestination", {
       params: { query: cityName, locale: "en-gb" },
       headers: { "X-RapidAPI-Key": RAPIDAPI_KEY!, "X-RapidAPI-Host": "booking-com15.p.rapidapi.com" },
     });
-    
+
     const destId = locResponse.data?.data?.[0]?.dest_id;
     if (!destId) throw new Error("City not found");
 
-    // Step 2: Search hotels
     const hotelResponse = await axios.get("https://booking-com15.p.rapidapi.com/api/v1/hotels/searchHotels", {
       params: {
         dest_id: destId,
@@ -130,94 +176,82 @@ async function extractTravelInfo(userMessage: string) {
   }
 }
 
-const app = express();
-app.use(express.json());
-
-// Serve agent card for A2A discovery
-app.get("/.well-known/agent-card.json", (req, res) => {
-  res.json({
+const server = new AgentServer({
+  agentCard: {
     name: "Warden Travel Research",
     description: "AI travel assistant - searches real flights (Amadeus) and hotels (Booking.com) worldwide",
     url: BASE_URL,
     version: "0.3.0",
     capabilities: { streaming: false, multiTurn: true },
-    defaultInputModes: ["text"],
-    defaultOutputModes: ["text"],
-  });
-});
-
-// Main POST / handler for Warden registration
-app.post("/", async (req, res) => {
-  try {
-    const { input } = req.body;
-    if (!input || !input.messages || input.messages.length === 0) {
-      return res.status(400).json({ error: "Missing messages in input" });
-    }
-    
-    const userMessage = input.messages[0]?.content;
+  },
+  handler: async function* (context: TaskContext): AsyncGenerator<TaskYieldUpdate> {
+    const userMessage = context.message.parts?.filter((p): p is MessagePart & { type: "text" } => p.type === "text").map((p) => p.text).join("\n");
     if (!userMessage) {
-      return res.status(400).json({ error: "Message content required" });
+      yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text: "No message received." }] } };
+      return;
     }
-    
-    const info = await extractTravelInfo(userMessage);
-    let responseText = "";
-    
-    if (info.intent === "search_flights" && info.origin && info.destination && info.departureDate) {
-      const flights = await searchFlights(info.origin, info.destination, info.departureDate);
-      responseText = ` Flights from ${info.origin} to ${info.destination} (${info.departureDate})\n\n`;
-      flights.forEach((f: any) => {
-        responseText += `${f.number}. ${f.airline} ${f.flightNumber}\n   Depart: ${f.departure}\n   Arrive: ${f.arrival}\n   Duration: ${f.duration}\n   Price: ${f.price}\n   Type: ${f.stops}\n\n`;
-      });
-      responseText += `Book at: Google Flights, Kayak, or airline websites`;
-    } else if (info.intent === "search_hotels" && info.destination && info.checkIn && info.checkOut) {
-      const hotels = await searchHotels(info.destination, info.checkIn, info.checkOut);
-      responseText = ` Hotels in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
-      hotels.forEach((h: any) => {
-        responseText += `${h.number}. ${h.name}\n   Rating: ${h.rating}/10 (${h.reviewCount} reviews)\n   Price: ${h.price} total\n   Location: ${h.location}\n\n`;
-      });
-      responseText += `Book at: Booking.com, Hotels.com, or directly with hotels`;
-    } else if (info.intent === "search_both" && info.origin && info.destination && info.departureDate && info.checkIn && info.checkOut) {
-      const [flights, hotels] = await Promise.all([
-        searchFlights(info.origin, info.destination, info.departureDate),
-        searchHotels(info.destination, info.checkIn, info.checkOut),
-      ]);
-      responseText = ` FLIGHTS from ${info.origin} to ${info.destination} (${info.departureDate})\n\n`;
-      flights.forEach((f: any) => {
-        responseText += `${f.number}. ${f.airline} ${f.flightNumber} - ${f.price} (${f.stops})\n`;
-      });
-      responseText += `\n HOTELS in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
-      hotels.forEach((h: any) => {
-        responseText += `${h.number}. ${h.name} - ${h.price} (${h.rating}/10)\n`;
-      });
-      responseText += `\nBook flights: Google Flights, Kayak | Book hotels: Booking.com`;
-    } else {
-      const resp = await llm.chat.completions.create({
-        model: process.env.GROK_API_KEY ? "grok-3" : "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "Travel assistant. Help with flights and hotels. Examples: 'Find flights from NYC to London on March 15' or 'Show hotels in Paris from April 1-5' or 'Plan trip to Tokyo March 10-15'" },
-          { role: "user", content: userMessage },
-        ],
-      });
-      responseText = resp.choices[0]?.message?.content || "No response generated";
+
+    try {
+      if (userMessage.toLowerCase().startsWith("onchain:")) {
+        const payload = userMessage.slice("onchain:".length).trim() || "direct-action";
+        try {
+          await callBridge(payload);
+        } catch (bridgeError: any) {
+          console.error("bridge call failed", bridgeError);
+        }
+      }
+
+      yield { state: "working" };
+      const info = await extractTravelInfo(userMessage);
+
+      if (info.intent === "search_flights" && info.origin && info.destination && info.departureDate) {
+        const flights = await searchFlights(info.origin, info.destination, info.departureDate);
+        let text = ` Flights from ${info.origin} to ${info.destination} (${info.departureDate})\n\n`;
+        flights.forEach((f: any) => {
+          text += `${f.number}. ${f.airline} ${f.flightNumber}\n   Depart: ${f.departure}\n   Arrive: ${f.arrival}\n   Duration: ${f.duration}\n   Price: ${f.price}\n   Type: ${f.stops}\n\n`;
+        });
+        text += `Book at: Google Flights, Kayak, or airline websites`;
+        yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text }] } };
+      } else if (info.intent === "search_hotels" && info.destination && info.checkIn && info.checkOut) {
+        const hotels = await searchHotels(info.destination, info.checkIn, info.checkOut);
+        let text = ` Hotels in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
+        hotels.forEach((h: any) => {
+          text += `${h.number}. ${h.name}\n   Rating: ${h.rating}/10 (${h.reviewCount} reviews)\n   Price: ${h.price} total\n   Location: ${h.location}\n\n`;
+        });
+        text += `Book at: Booking.com, Hotels.com, or directly with hotels`;
+        yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text }] } };
+      } else if (info.intent === "search_both" && info.origin && info.destination && info.departureDate && info.checkIn && info.checkOut) {
+        const [flights, hotels] = await Promise.all([
+          searchFlights(info.origin, info.destination, info.departureDate),
+          searchHotels(info.destination, info.checkIn, info.checkOut),
+        ]);
+        let text = ` FLIGHTS from ${info.origin} to ${info.destination} (${info.departureDate})\n\n`;
+        flights.forEach((f: any) => {
+          text += `${f.number}. ${f.airline} ${f.flightNumber} - ${f.price} (${f.stops})\n`;
+        });
+        text += `\n HOTELS in ${info.destination} (${info.checkIn} to ${info.checkOut})\n\n`;
+        hotels.forEach((h: any) => {
+          text += `${h.number}. ${h.name} - ${h.price} (${h.rating}/10)\n`;
+        });
+        text += `\nBook flights: Google Flights, Kayak | Book hotels: Booking.com`;
+        yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text }] } };
+      } else {
+        const resp = await llm.chat.completions.create({
+          model: process.env.GROK_API_KEY ? "grok-3" : "gpt-4o-mini",
+          messages: [
+            { role: "system", content: "Travel assistant. Help with flights and hotels. Examples: 'Find flights from NYC to London on March 15' or 'Show hotels in Paris from April 1-5' or 'Plan trip to Tokyo March 10-15'" },
+            { role: "user", content: userMessage },
+          ],
+        });
+        yield { state: "completed", message: { role: "agent", parts: [{ type: "text", text: resp.choices[0]?.message?.content || "" }] } };
+      }
+    } catch (error: any) {
+      yield { state: "failed", message: { role: "agent", parts: [{ type: "text", text: `Error: ${error.message}` }] } };
     }
-    
-    res.json({
-      output: {
-        messages: [
-          {
-            role: "agent",
-            content: responseText,
-          },
-        ],
-      },
-    });
-  } catch (error: any) {
-    console.error("POST / error:", error);
-    res.status(500).json({ error: error.message });
-  }
+  },
 });
 
-app.listen(PORT, HOST, () => {
+server.listen(PORT).then(() => {
   const llmProvider = process.env.GROK_API_KEY ? "Grok" : "OpenAI";
   console.log(`\nWarden Travel Agent ready at ${BASE_URL}`);
   console.log(`LLM: ${llmProvider} - ${!!(process.env.GROK_API_KEY || process.env.OPENAI_API_KEY) ? "" : ""}`);
